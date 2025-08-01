@@ -1,139 +1,116 @@
-#include <signal.h>
-#include <stdbool.h>
 #include <stdlib.h>
-#include <sys/wait.h>
 #include <stdio.h>
-#include <unistd.h>
+#include <stdbool.h>
+#include <errno.h>
+#include <sys/wait.h>
 #include <string.h>
+#include <signal.h>
+#include <unistd.h>
 
-pid_t	g_pid;
-volatile sig_atomic_t g_timeout;
-
-void	reset_signals(struct sigaction *sa_default)
+void alarm_handler(int sig)
 {
-	sigaction(SIGTERM, sa_default, NULL);
-	sigaction(SIGQUIT, sa_default, NULL);
-	sigaction(SIGINT, sa_default, NULL);
-	sigaction(SIGALRM, sa_default, NULL);
+	(void)sig;
 }
 
-void	alarm_handler(int signal)
+int	sandbox(void (*f)(void), unsigned int timeout, bool verbose)
 {
-	if (signal == SIGALRM)
-	{
-		g_timeout = 1;
-		if (g_pid > 0)
-			kill(g_pid, SIGKILL);
-	}
-}
-
-int    sandbox(void (*f)(void), unsigned int timeout, bool verbose)
-{
-	struct sigaction sa_default;
-	struct sigaction sa_ignore;
-	struct sigaction sa_alarm;
-	int code;
+	pid_t pid;
 	int status;
 
-	sigemptyset(&sa_default.sa_mask);
-	sa_default.sa_flags = SA_RESTART;
-	sa_default.sa_handler = SIG_DFL;
-	sigemptyset(&sa_ignore.sa_mask);
-	sa_ignore.sa_flags = SA_RESTART;
-	sa_ignore.sa_handler = SIG_IGN;
-	sigemptyset(&sa_alarm.sa_mask);
-	sa_alarm.sa_flags = SA_RESTART;
-	sa_alarm.sa_handler = alarm_handler;
-	if (sigaction(SIGTERM, &sa_ignore, NULL) < 0 
-	|| sigaction(SIGQUIT, &sa_ignore, NULL) < 0
-	|| sigaction(SIGINT, &sa_ignore, NULL) < 0)
-		return (reset_signals(&sa_default), -1);
-	g_pid = fork();
-	if (g_pid < 0)
-		return (reset_signals(&sa_default), -1);
-	else if (g_pid == 0)
+	struct sigaction sa;
+	sa.sa_handler = alarm_handler;
+	sa.sa_flags = 0;
+	if (sigaction(SIGALRM, &sa, NULL) < 0)
+		return -1;
+	
+	pid = fork();
+	if (pid == -1)
+		return -1;
+	if (pid == 0)
 	{
-		if (sigaction(SIGTERM, &sa_default, NULL) < 0
-		|| sigaction(SIGQUIT, &sa_default, NULL) < 0
-		|| sigaction(SIGINT, &sa_default, NULL) < 0)
-			exit(1);
-		(*f)();
+		f();
 		exit(0);
 	}
-	g_timeout = 0;
-	if (sigaction(SIGALRM, &sa_alarm, NULL) < 0)
-		return (reset_signals(&sa_default), -1);
+
 	alarm(timeout);
-	if (waitpid(g_pid, &status, 0) < 0)
-		return (reset_signals(&sa_default), -1);
-	alarm(0);
-	if (g_timeout == 1)
+	if (waitpid(pid, &status, 0) == -1)
 	{
-		if (verbose)
-			printf("Bad function: timed out after %d seconds\n", timeout);
-		return (reset_signals(&sa_default), 0);
+		if (errno == EINTR)
+		{
+			kill(pid, SIGKILL);
+			waitpid(pid, NULL, 0);
+			if (verbose)
+				printf("Bad function: timed out after %d seconds\n", timeout);
+			return 0;
+		}
+		return -1;
 	}
 	if (WIFEXITED(status))
 	{
-		code = WEXITSTATUS(status);
-		if (!code)
+		if (WEXITSTATUS(status) == 0)
 		{
 			if (verbose)
-				printf("Nice function!\n");
-			return (reset_signals(&sa_default), 1);
+				printf("Nice function\n");
+			return 1;
 		}
 		else
 		{
 			if (verbose)
-				printf("Bad function: exited with code %d\n", code);
-			return (reset_signals(&sa_default), 0);
+				printf("Bad function: exited with code %d\n", WEXITSTATUS(status));
+			return 0;
 		}
 	}
 	if (WIFSIGNALED(status))
 	{
 		if (verbose)
 			printf("Bad function: %s\n", strsignal(WTERMSIG(status)));
-		return (reset_signals(&sa_default), 0);
+		return 0;
 	}
-	return (reset_signals(&sa_default), -1);
+	return -1;
 }
 
-static void	nice_exit()
+//fts to test
+
+void nice_ft()
 {
-	exit(0);
+	return ;
 }
 
-static void	bad_exit()
+void bad_ft_exit()
 {
-	exit (3);
+	exit(1);
 }
 
-static void	timeout_test()
+void bad_ft_segfault()
 {
-	while (1)
-	{
-		printf("timeout_test function running...\n");
-		sleep(1);
-	}
+	char *str = NULL;
+	str[2] = 'a';
 }
 
-static void	sigsegv_test()
+void bad_ft_timeout()
 {
-	char	*str = NULL;
-	str[0] = '0';
+	while(1)
+		;
 }
 
-static void	sigabrt_test()
+void bad_ft_sigkill()
 {
-	abort();
+	sleep(5);
 }
 
-int	main()
+int main()
 {
-	sandbox(&nice_exit, 5, 1);
-	sandbox(&bad_exit, 5, 1);
-	sandbox(&timeout_test, 5, 1);
-	sandbox(&sigsegv_test, 5, 1);
-	sandbox(&sigabrt_test, 5, 1);
-	return (0);
+	int r;
+
+	r = sandbox(nice_ft, 5, true);
+	printf("res is %d\n", r);
+	r = sandbox(bad_ft_exit, 5, true);
+	printf("res is %d\n", r);
+	r = sandbox(bad_ft_segfault, 5, true);
+	printf("res is %d\n", r);
+	r = sandbox(bad_ft_timeout, 2, true);
+	printf("res is %d\n", r);
+	r = sandbox(bad_ft_sigkill, 1, true);
+	printf("res is %d\n", r);
+	return 0;
 }
